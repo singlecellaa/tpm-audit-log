@@ -24,7 +24,9 @@ tpm2_createprimary -C o -g sha256 -G rsa -c "$PRIMARY_CTX"
 SIGN_CTX=$(mktemp)
 PUB_PEM=signkey.pub
 PRIV_PEM=signkey.priv
+PUB="data/pub.pem"
 tpm2_create -C "$PRIMARY_CTX" -G rsa -u $PUB_PEM -r $PRIV_PEM
+tpm2_readpublic -c 0x81000010 -o "$PUB" -f PEM
 
 # Load and make persistent (skip if already present)
 CHILD_CTX=$(mktemp)

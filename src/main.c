@@ -48,12 +48,15 @@ int inotify_fd;
 watched_file_t watched_files[MAX_WATCHED_FILES];
 int num_watched_files = 0;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
+unsigned long long audit_index = 1; // Starting index for audit logs
 int running = 1;
 
 // 函数声明
 void log_audit_event(const char *event_type, const char *file_path, const char *user, int success);
 const char *get_current_user();
 void cleanup();
+void check_audit_log();
+void load_last_index();
 void *monitor_thread(void *arg);
 void *command_thread(void *arg);
 int add_watch(const char *path);
@@ -66,13 +69,20 @@ void log_audit_event(const char *event_type, const char *file_path, const char *
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
+    pthread_mutex_lock(&mutex);
+    unsigned long long current_index = audit_index++;
+    pthread_mutex_unlock(&mutex);
+
     char log_entry[1024];
-    snprintf(log_entry, sizeof(log_entry), "%s | %s | %s | %s | %s",
-             timestamp, user, event_type, file_path, success ? "SUCCESS" : "FAILURE");
+    snprintf(log_entry, sizeof(log_entry), "%llu | %s | %s | %s | %s | %s",
+             current_index, timestamp, user, event_type, file_path, success ? "SUCCESS" : "FAILURE");
 
     // Compute SHA256 of log_entry
     unsigned char hash[HASH_SIZE];
     SHA256((const unsigned char *)log_entry, strlen(log_entry), hash);
+    char hash_str[HASH_SIZE * 2 + 1];
+    Bin2HexStr(hash, HASH_SIZE, hash_str, sizeof(hash_str));
+    printf("hash: %s\n", hash_str);
 
     // Sign the hash with TPM
     struct TpmSigner signer;
@@ -122,6 +132,110 @@ void log_audit_event(const char *event_type, const char *file_path, const char *
 
     free(sig);
     tpm_signer_cleanup(&signer);
+}
+
+void load_last_index() {
+    FILE *fp = fopen(LOG_FILE, "r");
+    if (!fp) return;
+
+    char line[2048];
+    unsigned long long max_index = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        unsigned long long index;
+        if (sscanf(line, "%llu", &index) == 1) {
+            if (index > max_index) max_index = index;
+        }
+    }
+
+    fclose(fp);
+    audit_index = max_index + 1;
+}
+
+void check_audit_log() {
+    FILE *fp = fopen(LOG_FILE, "r");
+    if (!fp) {
+        fprintf(stderr, "Failed to open audit log file: %s\n", strerror(errno));
+        return;
+    }
+
+    char line[2048];
+    unsigned long long expected_index = 1;
+    int has_issues = 0;
+
+    while (fgets(line, sizeof(line), fp)) {
+        // Remove newline
+        line[strcspn(line, "\n")] = 0;
+
+        // Find the last ' | ' to separate sig_hex
+        char *last_pipe = strrchr(line, '|');
+        if (!last_pipe) {
+            printf("Tampered: Invalid format - %s\n", line);
+            has_issues = 1;
+            continue;
+        }
+        *last_pipe = '\0';
+        char *sig_hex = last_pipe + 2; // Skip ' | '
+
+        // Trim trailing space from log_entry
+        size_t len = strlen(line);
+        if (len > 0 && line[len - 1] == ' ') {
+            line[len - 1] = '\0';
+        }
+
+        // Now line is the log_entry
+        unsigned long long index;
+        if (sscanf(line, "%llu", &index) != 1) {
+            printf("Tampered: Invalid index - %s\n", line);
+            has_issues = 1;
+            continue;
+        }
+
+        // Check for gaps
+        if (index != expected_index) {
+            printf("Deleted: Missing indices from %llu to %llu\n", expected_index, index - 1);
+            has_issues = 1;
+            expected_index = index + 1;
+            // Continue checking from here
+        } else {
+            expected_index++;
+        }
+
+        // Compute hash of log_entry
+        unsigned char hash[HASH_SIZE];
+        SHA256((const unsigned char *)line, strlen(line), hash);
+
+        // Check if unsigned
+        if (strcmp(sig_hex, "UNSIGNED") == 0) {
+            printf("Warning: Unsigned log entry for index %llu\n", index);
+            continue;
+        }
+
+        // Decode sig_hex to binary
+        size_t sig_len = strlen(sig_hex) / 2;
+        unsigned char *sig = malloc(sig_len);
+        if (!sig) {
+            printf("Error: Memory allocation failed\n");
+            continue;
+        }
+        for (size_t i = 0; i < sig_len; i++) {
+            sscanf(sig_hex + 2 * i, "%2hhx", &sig[i]);
+        }
+
+        // Verify signature
+        if (verify_rsa_sha256("data/pub.pem", hash, sig, sig_len) != 0) {
+            printf("Tampered: Signature verification failed for index %llu - %s\n", index, line);
+            has_issues = 1;
+        }
+
+        free(sig);
+    }
+
+    fclose(fp);
+
+    if (!has_issues) {
+        printf("Audit log integrity check passed\n");
+    }
 }
 
 const char *get_current_user() {
@@ -291,8 +405,6 @@ void *monitor_thread(void *arg) {
                 
                 log_audit_event(event_type, file_path, user, success);
                 
-                // Extra output to console
-                printf("Detected: %s on %s by %s\n", event_type, file_path, user);
             }
             
             i += EVENT_SIZE + event->len;
@@ -318,6 +430,7 @@ void *command_thread(void *arg) {
     printf("  verify-sig <pubkey> - Verify signature with public key\n");
     printf("  head          - Show current chain head\n");
     printf("  nv-read-head  - Read head from TPM NV\n");
+    printf("  check-audit   - Check audit log integrity\n");
     printf("  quit          - Exit program\n\n");
     
     while (running) {
@@ -369,6 +482,8 @@ void *command_thread(void *arg) {
             do_head();
         } else if (strcmp(command, "nv-read-head") == 0) {
             do_nv_read_head();
+        } else if (strcmp(command, "check-audit") == 0) {
+            check_audit_log();
         } else if (strcmp(command, "quit") == 0) {
             running = 0;
             break;
@@ -392,6 +507,8 @@ int main(int argc, char *argv[]) {
     
     printf("TPM Audit Logger started\n");
     printf("Log file: %s\n\n", LOG_FILE);
+    
+    load_last_index();
     
     // Start threads
     if (pthread_create(&monitor_tid, NULL, monitor_thread, NULL) != 0) {
