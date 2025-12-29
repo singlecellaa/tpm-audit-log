@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS ?= -Wall -Wextra -O2 -Iinclude
-LDFLAGS ?= -ltss2-esys -ltss2-rc -ltss2-tctildr -ltss2-mu -lcrypto
+LDFLAGS ?= -ltss2-esys -ltss2-rc -ltss2-tctildr -ltss2-mu -lcrypto -lpthread
 
 SRC := src/main.c src/log_listener.c src/hash_chain.c src/tpm_signer.c src/storage.c src/verification.c src/cli.c src/tpm_nv.c src/sig_verify.c
 OBJDIR := build/obj

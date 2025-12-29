@@ -12,18 +12,10 @@
 #include <limits.h>
 
 #include "cli.h"
-#include "common.h"
-#include "hash_chain.h"
-#include "log_listener.h"
-#include "storage.h"
-#include "sig_verify.h"
-#include "tpm_nv.h"
-#include "tpm_signer.h"
-#include "verification.h"
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (1024 * (EVENT_SIZE + 16))
-#define LOG_FILE DEFAULT_STORAGE_PATH
+#define LOG_FILE "data/audit_log.txt"
 #define PATH_MAX 256
 #define MAX_WATCHED_FILES 100
 
@@ -33,6 +25,17 @@
         fprintf(stderr, "Error: %s: %s\n", msg, strerror(errno)); \
         action; \
     }
+
+// Function to convert binary to hex string
+void Bin2HexStr(const unsigned char *bin, size_t len, char *hex_out, size_t hex_len) {
+    static const char *hex_chars = "0123456789abcdef";
+    if (!bin || !hex_out || hex_len < len * 2 + 1) return;
+    for (size_t i = 0; i < len; ++i) {
+        hex_out[i * 2] = hex_chars[(bin[i] >> 4) & 0xF];
+        hex_out[i * 2 + 1] = hex_chars[bin[i] & 0xF];
+    }
+    hex_out[len * 2] = '\0';
+}
 
 // Watched file structure
 typedef struct {
@@ -58,27 +61,67 @@ int remove_watch(const char *path);
 void list_watched_files();
 const char *get_path_from_wd(int wd);
 
-// 暂时禁用TPM签名，先用简单日志
 void log_audit_event(const char *event_type, const char *file_path, const char *user, int success) {
     time_t now = time(NULL);
     char timestamp[64];
     strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", localtime(&now));
 
     char log_entry[1024];
-    snprintf(log_entry, sizeof(log_entry), "%s | %s | %s | %s | %s\n",
+    snprintf(log_entry, sizeof(log_entry), "%s | %s | %s | %s | %s",
              timestamp, user, event_type, file_path, success ? "SUCCESS" : "FAILURE");
 
-    // 写入日志文件
+    // Compute SHA256 of log_entry
+    unsigned char hash[HASH_SIZE];
+    SHA256((const unsigned char *)log_entry, strlen(log_entry), hash);
+
+    // Sign the hash with TPM
+    struct TpmSigner signer;
+    if (tpm_signer_init(&signer, NULL, DEFAULT_PERSISTENT_KEY) != 0) {
+        fprintf(stderr, "TPM signer init failed\n");
+        // Fallback to unsigned log
+        FILE *log_fp = fopen(LOG_FILE, "a");
+        if (log_fp) {
+            fputs(log_entry, log_fp);
+            fputs(" | UNSIGNED\n", log_fp);
+            fclose(log_fp);
+        }
+        return;
+    }
+
+    unsigned char *sig = NULL;
+    size_t sig_len = 0;
+    if (tpm_signer_sign(&signer, hash, &sig, &sig_len) != 0) {
+        fprintf(stderr, "TPM sign failed\n");
+        tpm_signer_cleanup(&signer);
+        // Fallback
+        FILE *log_fp = fopen(LOG_FILE, "a");
+        if (log_fp) {
+            fputs(log_entry, log_fp);
+            fputs(" | UNSIGNED\n", log_fp);
+            fclose(log_fp);
+        }
+        return;
+    }
+
+    // Hex encode signature
+    char sig_hex[1024]; // Assume sig_len <= 256
+    Bin2HexStr(sig, sig_len, sig_hex, sizeof(sig_hex));
+
+    // Write log_entry | sig_hex to file
     FILE *log_fp = fopen(LOG_FILE, "a");
     if (log_fp) {
         fputs(log_entry, log_fp);
+        fputs(" | ", log_fp);
+        fputs(sig_hex, log_fp);
+        fputs("\n", log_fp);
         fclose(log_fp);
-        printf("Logged: %s", log_entry);
+        printf("Logged: %s\n", log_entry);
     } else {
         fprintf(stderr, "Failed to open log file: %s\n", strerror(errno));
     }
 
-    
+    free(sig);
+    tpm_signer_cleanup(&signer);
 }
 
 const char *get_current_user() {
@@ -88,12 +131,6 @@ const char *get_current_user() {
         return "unknown";
     }
     return pw->pw_name;
-}
-
-// 检查文件是否存在
-int file_exists(const char *path) {
-    struct stat buffer;
-    return (stat(path, &buffer) == 0);
 }
 
 void cleanup() {
@@ -275,6 +312,12 @@ void *command_thread(void *arg) {
     printf("  add <path>    - Add file to watch\n");
     printf("  remove <path> - Remove file from watch\n");
     printf("  list          - List watched files\n");
+    printf("  append <text> - Append text to log chain\n");
+    printf("  append-file <path> - Append file contents to log chain\n");
+    printf("  verify        - Verify log chain integrity\n");
+    printf("  verify-sig <pubkey> - Verify signature with public key\n");
+    printf("  head          - Show current chain head\n");
+    printf("  nv-read-head  - Read head from TPM NV\n");
     printf("  quit          - Exit program\n\n");
     
     while (running) {
@@ -296,6 +339,36 @@ void *command_thread(void *arg) {
             remove_watch(path);
         } else if (strcmp(command, "list") == 0) {
             list_watched_files();
+        } else if (strncmp(command, "append ", 7) == 0) {
+            const char *text = command + 7;
+            do_append(text);
+        } else if (strncmp(command, "append-file ", 12) == 0) {
+            const char *path = command + 12;
+            FILE *f = fopen(path, "r");
+            if (!f) { 
+                fprintf(stderr, "Cannot open %s\n", path); 
+            } else {
+                char buf[MAX_LOG_LINE];
+                int rc_total = 0;
+                while (fgets(buf, sizeof(buf), f)) {
+                    size_t len = strlen(buf);
+                    if (len && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[len-1] = '\0';
+                    if (do_append(buf) != 0) rc_total = 1;
+                }
+                fclose(f);
+                if (rc_total == 0) {
+                    printf("Appended file %s\n", path);
+                }
+            }
+        } else if (strcmp(command, "verify") == 0) {
+            do_verify();
+        } else if (strncmp(command, "verify-sig ", 11) == 0) {
+            const char *pub = command + 11;
+            do_verify_sig(pub);
+        } else if (strcmp(command, "head") == 0) {
+            do_head();
+        } else if (strcmp(command, "nv-read-head") == 0) {
+            do_nv_read_head();
         } else if (strcmp(command, "quit") == 0) {
             running = 0;
             break;
