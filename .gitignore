@@ -1,0 +1,9 @@
+build/
+data/
+*.o
+*.pem
+*.priv
+*.pub
+*.ctx
+*.pid
+NVChip
