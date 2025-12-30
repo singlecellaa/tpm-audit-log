@@ -26,7 +26,6 @@ PUB_PEM=signkey.pub
 PRIV_PEM=signkey.priv
 PUB="data/pub.pem"
 tpm2_create -C "$PRIMARY_CTX" -G rsa -u $PUB_PEM -r $PRIV_PEM
-tpm2_readpublic -c 0x81000010 -o "$PUB" -f PEM
 
 # Load and make persistent (skip if already present)
 CHILD_CTX=$(mktemp)
@@ -41,3 +40,5 @@ if ! tpm2_getcap handles-nv-index | grep -q "$NV_INDEX"; then
 fi
 
 echo "Provisioned signing key at $HANDLE and NV index $NV_INDEX"
+
+tpm2_readpublic -c 0x81000010 -o "$PUB" -f PEM

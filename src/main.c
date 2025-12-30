@@ -80,9 +80,6 @@ void log_audit_event(const char *event_type, const char *file_path, const char *
     // Compute SHA256 of log_entry
     unsigned char hash[HASH_SIZE];
     SHA256((const unsigned char *)log_entry, strlen(log_entry), hash);
-    char hash_str[HASH_SIZE * 2 + 1];
-    Bin2HexStr(hash, HASH_SIZE, hash_str, sizeof(hash_str));
-    printf("hash: %s\n", hash_str);
 
     // Sign the hash with TPM
     struct TpmSigner signer;
@@ -421,15 +418,15 @@ void *command_thread(void *arg) {
     
     printf("Command thread started\n");
     printf("Available commands:\n");
+    printf("  append <text> - Append text to log chain\n");
+    printf("  append-file <path> - Append file contents to log chain\n");
+    printf("  head          - Show current chain head\n");
+    printf("  nv-read-head  - Read head from TPM NV\n");
+    printf("  verify        - Verify log chain integrity\n");
+    printf("  verify-sig    - Verify signature with public key\n");
     printf("  add <path>    - Add file to watch\n");
     printf("  remove <path> - Remove file from watch\n");
     printf("  list          - List watched files\n");
-    printf("  append <text> - Append text to log chain\n");
-    printf("  append-file <path> - Append file contents to log chain\n");
-    printf("  verify        - Verify log chain integrity\n");
-    printf("  verify-sig <pubkey> - Verify signature with public key\n");
-    printf("  head          - Show current chain head\n");
-    printf("  nv-read-head  - Read head from TPM NV\n");
     printf("  check-audit   - Check audit log integrity\n");
     printf("  quit          - Exit program\n\n");
     
@@ -475,9 +472,8 @@ void *command_thread(void *arg) {
             }
         } else if (strcmp(command, "verify") == 0) {
             do_verify();
-        } else if (strncmp(command, "verify-sig ", 11) == 0) {
-            const char *pub = command + 11;
-            do_verify_sig(pub);
+        } else if (strncmp(command, "verify-sig", 10) == 0) {
+            do_verify_sig();
         } else if (strcmp(command, "head") == 0) {
             do_head();
         } else if (strcmp(command, "nv-read-head") == 0) {

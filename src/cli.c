@@ -132,7 +132,7 @@ int do_head(void) {
  * Returns:
  *   0 on success, 1 on failure.
  */
-int do_verify_sig(const char *pubkey_path) {
+int do_verify_sig() {
     /* Load expected head, last signature and verify. */
     struct HashChainState st;
     if (storage_load_chain(DEFAULT_CHAIN_PATH, &st) != 0) {
@@ -145,7 +145,7 @@ int do_verify_sig(const char *pubkey_path) {
         fprintf(stderr, "No signature entries\n");
         return 1;
     }
-    int ok = verify_rsa_sha256(pubkey_path, st.head, sig, sig_len);
+    int ok = verify_rsa_sha256("data/pub.pem", st.head, sig, sig_len);
     free(sig);
     if (ok == 0) {
         printf("Signature OK for seq=%llu\n", (unsigned long long)seq);

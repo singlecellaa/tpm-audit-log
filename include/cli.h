@@ -17,7 +17,7 @@
 int file_exists(const char *path);
 int do_append(const char *text);
 int do_verify(void);
-int do_verify_sig(const char *pubkey_path);
+int do_verify_sig();
 int do_head(void);
 int do_nv_read_head(void);
 
